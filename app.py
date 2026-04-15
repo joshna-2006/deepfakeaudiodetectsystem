@@ -1,6 +1,6 @@
 # ============================================
 # DEEPFAKE AUDIO DETECTION & ENHANCEMENT SYSTEM
-# WORKS WITH ANY AUDIO FORMAT (M4A, MP3, WAV, etc.)
+# FULLY FIXED - Converts M4A to WAV automatically
 # ============================================
 
 import streamlit as st
@@ -15,7 +15,6 @@ import tempfile
 import os
 import warnings
 import subprocess
-import sys
 
 warnings.filterwarnings('ignore')
 
@@ -25,7 +24,7 @@ warnings.filterwarnings('ignore')
 FILE_ID = "14zV9ptEwXzI_0yOAyjrZe_4QjeggIPjJ"
 
 # ============================================
-# COMPLETE RESNET MODEL
+# RESNET MODEL ARCHITECTURE
 # ============================================
 
 class ResidualBlock(nn.Module):
@@ -92,7 +91,44 @@ class ResNetDetector(nn.Module):
         return x
 
 # ============================================
-# AUDIO PREPROCESSOR - HANDLES ANY FORMAT
+# AUDIO CONVERTER - M4A to WAV
+# ============================================
+
+def convert_to_wav(input_path, output_path, target_sr=16000):
+    """Convert any audio file to WAV format using multiple methods"""
+    
+    # Method 1: Try ffmpeg (best)
+    try:
+        cmd = f"ffmpeg -i {input_path} -ar {target_sr} -ac 1 {output_path} -y -loglevel error"
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        if result.returncode == 0 and os.path.exists(output_path):
+            return True
+    except:
+        pass
+    
+    # Method 2: Try librosa with audioread
+    try:
+        import librosa
+        audio, sr = librosa.load(input_path, sr=target_sr, mono=True)
+        sf.write(output_path, audio, target_sr)
+        return True
+    except:
+        pass
+    
+    # Method 3: Try pydub
+    try:
+        from pydub import AudioSegment
+        audio = AudioSegment.from_file(input_path)
+        audio = audio.set_frame_rate(target_sr).set_channels(1)
+        audio.export(output_path, format="wav")
+        return True
+    except:
+        pass
+    
+    return False
+
+# ============================================
+# AUDIO PREPROCESSOR
 # ============================================
 
 class AudioPreprocessor:
@@ -104,39 +140,20 @@ class AudioPreprocessor:
         self.hop_length = 512
         self.max_length = int(sample_rate * duration)
     
-    def convert_to_wav(self, input_path, output_path):
-        """Convert any audio format to WAV using ffmpeg"""
-        try:
-            # Try using ffmpeg (most reliable)
-            cmd = f"ffmpeg -i {input_path} -ar {self.sample_rate} -ac 1 {output_path} -y -loglevel quiet"
-            subprocess.run(cmd, shell=True, check=True)
-            return True
-        except:
-            try:
-                # Fallback: Use librosa directly (supports m4a, mp3, etc.)
-                audio, sr = librosa.load(input_path, sr=self.sample_rate, mono=True, duration=self.duration)
-                sf.write(output_path, audio, self.sample_rate)
-                return True
-            except:
-                return False
-    
     def load_audio(self, audio_path):
-        """Load audio from any format"""
-        try:
-            # Try direct loading with librosa (supports m4a, mp3, wav)
-            audio, sr = librosa.load(audio_path, sr=self.sample_rate, mono=True, duration=self.duration)
-            return audio, sr
-        except:
-            try:
-                # Convert to wav first
-                temp_wav = tempfile.NamedTemporaryFile(delete=False, suffix='.wav').name
-                if self.convert_to_wav(audio_path, temp_wav):
-                    audio, sr = librosa.load(temp_wav, sr=self.sample_rate, mono=True)
-                    os.unlink(temp_wav)
-                    return audio, sr
-            except:
-                pass
-            raise Exception(f"Cannot load audio file: {audio_path}")
+        """Load audio, convert to WAV if needed"""
+        # Check if file is already WAV
+        if not audio_path.endswith('.wav'):
+            # Convert to WAV
+            temp_wav = tempfile.NamedTemporaryFile(delete=False, suffix='.wav').name
+            if convert_to_wav(audio_path, temp_wav, self.sample_rate):
+                audio, sr = librosa.load(temp_wav, sr=self.sample_rate, mono=True)
+                os.unlink(temp_wav)
+                return audio, sr
+        
+        # Direct load for WAV files
+        audio, sr = librosa.load(audio_path, sr=self.sample_rate, mono=True)
+        return audio, sr
     
     def pad_or_truncate(self, audio):
         if len(audio) >= self.max_length:
@@ -155,12 +172,18 @@ class AudioPreprocessor:
     
     def process_audio(self, audio_path):
         audio, _ = self.load_audio(audio_path)
-        audio = self.pad_or_truncate(audio)
+        
+        # Ensure correct length
+        if len(audio) < self.max_length:
+            audio = self.pad_or_truncate(audio)
+        else:
+            audio = audio[:self.max_length]
+        
         mel_spec = self.extract_mel_spectrogram(audio)
         return mel_spec, audio
 
 # ============================================
-# DOWNLOAD MODEL FROM GOOGLE DRIVE
+# DOWNLOAD MODEL
 # ============================================
 
 @st.cache_resource
@@ -168,15 +191,15 @@ def load_model():
     model_path = Path("deepfake_detector.pth")
     
     if not model_path.exists():
-        with st.spinner("📥 Downloading AI model (128MB)... First time only, please wait..."):
+        with st.spinner("📥 Downloading AI model (128MB)... Please wait..."):
             try:
                 import gdown
                 url = f"https://drive.google.com/uc?id={FILE_ID}"
                 gdown.download(url, str(model_path), quiet=False)
-                st.success("✅ Model downloaded successfully!")
+                st.success("✅ Model downloaded!")
             except Exception as e:
                 st.error(f"❌ Download failed: {e}")
-                return None
+                return None, None
     
     try:
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -191,7 +214,7 @@ def load_model():
         model.eval()
         return model, device
     except Exception as e:
-        st.error(f"❌ Failed to load model: {e}")
+        st.error(f"❌ Model load error: {e}")
         return None, None
 
 # ============================================
@@ -206,6 +229,11 @@ class DeepfakeDetector:
     
     def predict(self, audio_path):
         mel_spec, audio = self.preprocessor.process_audio(audio_path)
+        
+        # Ensure correct shape
+        if mel_spec.shape[1] < 10:  # Too short
+            raise Exception("Audio too short or unreadable")
+        
         input_tensor = torch.FloatTensor(mel_spec).unsqueeze(0).unsqueeze(0).to(self.device)
         
         with torch.no_grad():
@@ -256,8 +284,8 @@ st.markdown("""
     .title { font-size: 2.5rem; font-weight: bold; text-align: center; 
              background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
              -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-    .real-badge { background-color: #10b981; color: white; padding: 0.75rem; border-radius: 2rem; text-align: center; font-weight: bold; }
-    .fake-badge { background-color: #ef4444; color: white; padding: 0.75rem; border-radius: 2rem; text-align: center; font-weight: bold; }
+    .real-badge { background-color: #10b981; color: white; padding: 0.75rem; border-radius: 2rem; text-align: center; font-weight: bold; font-size: 1.2rem; }
+    .fake-badge { background-color: #ef4444; color: white; padding: 0.75rem; border-radius: 2rem; text-align: center; font-weight: bold; font-size: 1.2rem; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -266,12 +294,13 @@ st.markdown('<div class="title">🎵 Deepfake Audio Detection System</div>', uns
 # Sidebar
 with st.sidebar:
     st.header("📁 Upload Audio")
+    st.info("Supported: WAV, MP3, M4A, FLAC, OGG")
     uploaded_file = st.file_uploader(
         "Choose an audio file",
-        type=['wav', 'mp3', 'm4a', 'flac', 'ogg', 'aac', 'wma']
+        type=['wav', 'mp3', 'm4a', 'flac', 'ogg']
     )
+    
     st.markdown("---")
-    st.header("⚙️ Settings")
     auto_enhance = st.checkbox("Auto-enhance deepfake audio", value=True)
     show_spectrogram = st.checkbox("Show spectrogram", value=True)
 
@@ -286,40 +315,40 @@ if uploaded_file is not None:
             tmp_file.write(uploaded_file.getvalue())
             temp_path = tmp_file.name
         
-        # Display original audio
+        # Show original audio
         col1, col2 = st.columns(2)
         with col1:
             st.subheader("🎧 Original Audio")
-            st.audio(temp_path, format='audio/wav')
+            st.audio(temp_path)
         
-        # Detect
+        # Process
         detector = DeepfakeDetector(model, device)
         
-        with st.spinner("🔍 Analyzing audio..."):
+        with st.spinner("🔍 Analyzing audio... This may take a few seconds..."):
             try:
                 result = detector.predict(temp_path)
                 
-                # Display results
+                # Results
                 st.markdown("---")
                 st.subheader("🔍 Detection Results")
                 
-                col_metric1, col_metric2, col_metric3 = st.columns(3)
-                
-                with col_metric1:
+                col1, col2, col3 = st.columns(3)
+                with col1:
                     if result['prediction'] == 'REAL':
                         st.markdown('<div class="real-badge">✅ REAL AUDIO</div>', unsafe_allow_html=True)
                     else:
-                        st.markdown('<div class="fake-badge">⚠️ DEEPFAKE DETECTED</div>', unsafe_allow_html=True)
+                        st.markdown('<div class="fake-badge">⚠️ DEEPFAKE</div>', unsafe_allow_html=True)
                 
-                with col_metric2:
+                with col2:
                     st.metric("Confidence", f"{result['confidence']*100:.1f}%")
                 
-                with col_metric3:
+                with col3:
                     st.metric("Decision", result['prediction'])
                 
                 # Probability bars
-                st.progress(result['real_prob'], text=f"🎵 Real: {result['real_prob']*100:.1f}%")
-                st.progress(result['fake_prob'], text=f"🤖 Deepfake: {result['fake_prob']*100:.1f}%")
+                st.write("**Confidence Distribution:**")
+                st.progress(result['real_prob'], text=f"Real: {result['real_prob']*100:.1f}%")
+                st.progress(result['fake_prob'], text=f"Deepfake: {result['fake_prob']*100:.1f}%")
                 
                 # Spectrogram
                 if show_spectrogram:
@@ -330,13 +359,15 @@ if uploaded_file is not None:
                     ax.set_xlabel("Time")
                     ax.set_ylabel("Frequency")
                     st.pyplot(fig)
+                    plt.close()
                 
-                # Enhancement for deepfake
+                # Enhancement
                 if result['prediction'] == 'DEEPFAKE' and auto_enhance:
                     st.markdown("---")
-                    st.subheader("🎛️ Enhanced Audio")
+                    st.subheader("✨ Enhanced Audio")
                     enhanced_path = temp_path + "_enhanced.wav"
                     AudioEnhancer.enhance_file(temp_path, enhanced_path)
+                    
                     with col2:
                         st.audio(enhanced_path)
                         with open(enhanced_path, 'rb') as f:
@@ -347,8 +378,8 @@ if uploaded_file is not None:
                     st.download_button("💾 Download Original", f, file_name=uploaded_file.name)
                 
             except Exception as e:
-                st.error(f"Error processing audio: {str(e)}")
-                st.info("Please try a different audio file or convert to WAV format")
+                st.error(f"Error: {str(e)}")
+                st.info("💡 Tip: Try converting your audio to WAV format using an online converter")
         
         # Cleanup
         try:
@@ -357,10 +388,11 @@ if uploaded_file is not None:
             pass
 
 else:
-    st.info("👈 **Please upload an audio file (MP3, M4A, WAV, etc.)**")
+    st.info("👈 **Upload an audio file (M4A, MP3, WAV, etc.) to detect if it's real or deepfake**")
     
     st.markdown("---")
-    st.subheader("✨ Supported Formats")
-    st.write("✅ MP3, M4A, WAV, FLAC, OGG, AAC, WMA")
-    st.write("✅ Any sample rate (auto-converted to 16kHz)")
-    st.write("✅ Any duration (trimmed/padded to 3 seconds)")
+    st.subheader("📌 How to use:")
+    st.write("1. Upload any audio file (your voice recording, AI-generated speech, etc.)")
+    st.write("2. The AI will analyze the spectrogram patterns")
+    st.write("3. Get instant results with confidence score")
+    st.write("4. If deepfake detected, enhance the audio to reduce artifacts")
