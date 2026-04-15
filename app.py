@@ -1,6 +1,6 @@
 # ============================================
 # DEEPFAKE AUDIO DETECTION & ENHANCEMENT SYSTEM
-# FINAL WORKING VERSION - MATCHES TRAINED MODEL
+# WORKS WITH ANY AUDIO FORMAT (M4A, MP3, WAV, etc.)
 # ============================================
 
 import streamlit as st
@@ -14,6 +14,9 @@ from pathlib import Path
 import tempfile
 import os
 import warnings
+import subprocess
+import sys
+
 warnings.filterwarnings('ignore')
 
 # ============================================
@@ -22,7 +25,7 @@ warnings.filterwarnings('ignore')
 FILE_ID = "14zV9ptEwXzI_0yOAyjrZe_4QjeggIPjJ"
 
 # ============================================
-# COMPLETE RESNET MODEL (Matches trained model exactly)
+# COMPLETE RESNET MODEL
 # ============================================
 
 class ResidualBlock(nn.Module):
@@ -54,19 +57,16 @@ class ResidualBlock(nn.Module):
 class ResNetDetector(nn.Module):
     def __init__(self, num_classes=2):
         super(ResNetDetector, self).__init__()
-        # Initial convolution - 64 channels (matches trained model)
         self.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
         self.bn1 = nn.BatchNorm2d(64)
         self.relu = nn.ReLU(inplace=True)
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
         
-        # Residual layers - 4 layers (ResNet-18 style)
         self.layer1 = self._make_layer(64, 64, 2, stride=1)
         self.layer2 = self._make_layer(64, 128, 2, stride=2)
         self.layer3 = self._make_layer(128, 256, 2, stride=2)
         self.layer4 = self._make_layer(256, 512, 2, stride=2)
         
-        # Global average pooling and classifier
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.dropout = nn.Dropout(0.5)
         self.fc = nn.Linear(512, num_classes)
@@ -92,51 +92,7 @@ class ResNetDetector(nn.Module):
         return x
 
 # ============================================
-# DOWNLOAD MODEL FROM GOOGLE DRIVE
-# ============================================
-
-@st.cache_resource
-def load_model():
-    """Download model from Google Drive and load it"""
-    model_path = Path("deepfake_detector.pth")
-    
-    # Download if not exists
-    if not model_path.exists():
-        with st.spinner("📥 Downloading AI model (128MB)... First time only, please wait..."):
-            try:
-                import gdown
-                url = f"https://drive.google.com/uc?id={FILE_ID}"
-                gdown.download(url, str(model_path), quiet=False)
-                st.success("✅ Model downloaded successfully!")
-            except Exception as e:
-                st.error(f"❌ Download failed: {e}")
-                return None
-    
-    # Load model
-    try:
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        model = ResNetDetector(num_classes=2).to(device)
-        
-        # Load checkpoint
-        checkpoint = torch.load(model_path, map_location=device)
-        
-        # Handle different checkpoint formats
-        if 'model_state_dict' in checkpoint:
-            model.load_state_dict(checkpoint['model_state_dict'])
-        else:
-            model.load_state_dict(checkpoint)
-        
-        model.eval()
-        
-        # Create detector wrapper
-        detector = DeepfakeDetector(model, device)
-        return detector
-    except Exception as e:
-        st.error(f"❌ Failed to load model: {e}")
-        return None
-
-# ============================================
-# AUDIO PREPROCESSOR
+# AUDIO PREPROCESSOR - HANDLES ANY FORMAT
 # ============================================
 
 class AudioPreprocessor:
@@ -148,9 +104,39 @@ class AudioPreprocessor:
         self.hop_length = 512
         self.max_length = int(sample_rate * duration)
     
+    def convert_to_wav(self, input_path, output_path):
+        """Convert any audio format to WAV using ffmpeg"""
+        try:
+            # Try using ffmpeg (most reliable)
+            cmd = f"ffmpeg -i {input_path} -ar {self.sample_rate} -ac 1 {output_path} -y -loglevel quiet"
+            subprocess.run(cmd, shell=True, check=True)
+            return True
+        except:
+            try:
+                # Fallback: Use librosa directly (supports m4a, mp3, etc.)
+                audio, sr = librosa.load(input_path, sr=self.sample_rate, mono=True, duration=self.duration)
+                sf.write(output_path, audio, self.sample_rate)
+                return True
+            except:
+                return False
+    
     def load_audio(self, audio_path):
-        audio, sr = librosa.load(audio_path, sr=self.sample_rate, mono=True, duration=self.duration)
-        return audio, sr
+        """Load audio from any format"""
+        try:
+            # Try direct loading with librosa (supports m4a, mp3, wav)
+            audio, sr = librosa.load(audio_path, sr=self.sample_rate, mono=True, duration=self.duration)
+            return audio, sr
+        except:
+            try:
+                # Convert to wav first
+                temp_wav = tempfile.NamedTemporaryFile(delete=False, suffix='.wav').name
+                if self.convert_to_wav(audio_path, temp_wav):
+                    audio, sr = librosa.load(temp_wav, sr=self.sample_rate, mono=True)
+                    os.unlink(temp_wav)
+                    return audio, sr
+            except:
+                pass
+            raise Exception(f"Cannot load audio file: {audio_path}")
     
     def pad_or_truncate(self, audio):
         if len(audio) >= self.max_length:
@@ -174,7 +160,42 @@ class AudioPreprocessor:
         return mel_spec, audio
 
 # ============================================
-# DEEPFAKE DETECTOR CLASS
+# DOWNLOAD MODEL FROM GOOGLE DRIVE
+# ============================================
+
+@st.cache_resource
+def load_model():
+    model_path = Path("deepfake_detector.pth")
+    
+    if not model_path.exists():
+        with st.spinner("📥 Downloading AI model (128MB)... First time only, please wait..."):
+            try:
+                import gdown
+                url = f"https://drive.google.com/uc?id={FILE_ID}"
+                gdown.download(url, str(model_path), quiet=False)
+                st.success("✅ Model downloaded successfully!")
+            except Exception as e:
+                st.error(f"❌ Download failed: {e}")
+                return None
+    
+    try:
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        model = ResNetDetector(num_classes=2).to(device)
+        
+        checkpoint = torch.load(model_path, map_location=device)
+        if 'model_state_dict' in checkpoint:
+            model.load_state_dict(checkpoint['model_state_dict'])
+        else:
+            model.load_state_dict(checkpoint)
+        
+        model.eval()
+        return model, device
+    except Exception as e:
+        st.error(f"❌ Failed to load model: {e}")
+        return None, None
+
+# ============================================
+# DEEPFAKE DETECTOR
 # ============================================
 
 class DeepfakeDetector:
@@ -184,13 +205,9 @@ class DeepfakeDetector:
         self.preprocessor = AudioPreprocessor()
     
     def predict(self, audio_path):
-        """Predict if audio is real or deepfake"""
         mel_spec, audio = self.preprocessor.process_audio(audio_path)
-        
-        # Convert to tensor [1, 1, height, width]
         input_tensor = torch.FloatTensor(mel_spec).unsqueeze(0).unsqueeze(0).to(self.device)
         
-        # Predict
         with torch.no_grad():
             output = self.model(input_tensor)
             probs = torch.softmax(output, dim=1)
@@ -213,18 +230,12 @@ class DeepfakeDetector:
 class AudioEnhancer:
     @staticmethod
     def enhance_audio(audio, sample_rate=16000):
-        """Simple enhancement to reduce deepfake artifacts"""
         from scipy import signal
-        
-        # Apply low-pass filter to remove high-frequency artifacts
         nyquist = sample_rate / 2
         cutoff = 7000 / nyquist
         b, a = signal.butter(6, cutoff, btype='low')
         audio_clean = signal.filtfilt(b, a, audio)
-        
-        # Normalize
         audio_clean = audio_clean / (np.max(np.abs(audio_clean)) + 1e-8)
-        
         return audio_clean
     
     @staticmethod
@@ -238,46 +249,18 @@ class AudioEnhancer:
 # STREAMLIT UI
 # ============================================
 
-st.set_page_config(
-    page_title="Deepfake Audio Detector",
-    page_icon="🎵",
-    layout="wide"
-)
+st.set_page_config(page_title="Deepfake Audio Detector", page_icon="🎵", layout="wide")
 
-# Custom CSS
 st.markdown("""
 <style>
-    .title {
-        font-size: 2.5rem;
-        font-weight: bold;
-        text-align: center;
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        margin-bottom: 1rem;
-    }
-    .real-badge {
-        background-color: #10b981;
-        color: white;
-        padding: 0.75rem;
-        border-radius: 2rem;
-        text-align: center;
-        font-weight: bold;
-        font-size: 1.2rem;
-    }
-    .fake-badge {
-        background-color: #ef4444;
-        color: white;
-        padding: 0.75rem;
-        border-radius: 2rem;
-        text-align: center;
-        font-weight: bold;
-        font-size: 1.2rem;
-    }
+    .title { font-size: 2.5rem; font-weight: bold; text-align: center; 
+             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+             -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    .real-badge { background-color: #10b981; color: white; padding: 0.75rem; border-radius: 2rem; text-align: center; font-weight: bold; }
+    .fake-badge { background-color: #ef4444; color: white; padding: 0.75rem; border-radius: 2rem; text-align: center; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
 
-# Title
 st.markdown('<div class="title">🎵 Deepfake Audio Detection System</div>', unsafe_allow_html=True)
 
 # Sidebar
@@ -285,161 +268,99 @@ with st.sidebar:
     st.header("📁 Upload Audio")
     uploaded_file = st.file_uploader(
         "Choose an audio file",
-        type=['wav', 'mp3', 'm4a', 'flac', 'ogg']
+        type=['wav', 'mp3', 'm4a', 'flac', 'ogg', 'aac', 'wma']
     )
-    
     st.markdown("---")
     st.header("⚙️ Settings")
     auto_enhance = st.checkbox("Auto-enhance deepfake audio", value=True)
     show_spectrogram = st.checkbox("Show spectrogram", value=True)
-    
-    st.markdown("---")
-    st.header("📊 Model Info")
-    st.info("""
-    - **Architecture:** ResNet-18
-    - **Input:** Mel-spectrogram (128×128)
-    - **Accuracy:** 95%+
-    - **Model Size:** 128MB
-    """)
 
 # Main content
 if uploaded_file is not None:
     # Load model
-    detector = load_model()
+    model, device = load_model()
     
-    if detector:
-        # Save uploaded file temporarily
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp_file:
+    if model is not None:
+        # Save uploaded file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_file.name).suffix) as tmp_file:
             tmp_file.write(uploaded_file.getvalue())
             temp_path = tmp_file.name
         
         # Display original audio
         col1, col2 = st.columns(2)
-        
         with col1:
             st.subheader("🎧 Original Audio")
             st.audio(temp_path, format='audio/wav')
         
-        # Run detection
+        # Detect
+        detector = DeepfakeDetector(model, device)
+        
         with st.spinner("🔍 Analyzing audio..."):
-            result = detector.predict(temp_path)
-        
-        # Display results
-        st.markdown("---")
-        st.subheader("🔍 Detection Results")
-        
-        # Metrics row
-        col_metric1, col_metric2, col_metric3 = st.columns(3)
-        
-        with col_metric1:
-            if result['prediction'] == 'REAL':
-                st.markdown('<div class="real-badge">✅ REAL AUDIO</div>', unsafe_allow_html=True)
-            else:
-                st.markdown('<div class="fake-badge">⚠️ DEEPFAKE DETECTED</div>', unsafe_allow_html=True)
-        
-        with col_metric2:
-            st.metric("Confidence Score", f"{result['confidence']*100:.1f}%")
-        
-        with col_metric3:
-            st.metric("Classification", result['prediction'])
-        
-        # Probability bars
-        st.write("**Confidence Distribution:**")
-        prob_col1, prob_col2 = st.columns(2)
-        
-        with prob_col1:
-            st.progress(result['real_prob'], text=f"🎵 Real: {result['real_prob']*100:.1f}%")
-        
-        with prob_col2:
-            st.progress(result['fake_prob'], text=f"🤖 Deepfake: {result['fake_prob']*100:.1f}%")
-        
-        # Spectrogram
-        if show_spectrogram:
-            st.subheader("📊 Spectrogram Analysis")
-            fig, ax = plt.subplots(figsize=(10, 4))
-            im = ax.imshow(result['mel_spec'], aspect='auto', origin='lower', cmap='viridis')
-            ax.set_title(f"Mel-Spectrogram - Prediction: {result['prediction']}")
-            ax.set_xlabel("Time Frame")
-            ax.set_ylabel("Mel Frequency Bin")
-            plt.colorbar(im, ax=ax, label='Intensity (dB)')
-            st.pyplot(fig)
-            plt.close()
-        
-        # Enhancement for deepfake audio
-        if result['prediction'] == 'DEEPFAKE' and auto_enhance:
-            st.markdown("---")
-            st.subheader("🎛️ Audio Enhancement")
-            
-            with st.spinner("✨ Enhancing audio to reduce artifacts..."):
-                enhanced_path = temp_path.replace('.wav', '_enhanced.wav')
-                AudioEnhancer.enhance_file(temp_path, enhanced_path)
+            try:
+                result = detector.predict(temp_path)
                 
-                with col2:
-                    st.subheader("✨ Enhanced Audio")
-                    st.audio(enhanced_path, format='audio/wav')
-                    st.caption("Artifacts reduced • Naturalness improved")
-                    
-                    with open(enhanced_path, 'rb') as f:
-                        st.download_button(
-                            label="💾 Download Enhanced Audio",
-                            data=f,
-                            file_name=f"enhanced_{uploaded_file.name}",
-                            mime="audio/wav"
-                        )
-        
-        # Download original button
-        with open(temp_path, 'rb') as f:
-            st.download_button(
-                label="💾 Download Original Audio",
-                data=f,
-                file_name=uploaded_file.name,
-                mime="audio/wav"
-            )
+                # Display results
+                st.markdown("---")
+                st.subheader("🔍 Detection Results")
+                
+                col_metric1, col_metric2, col_metric3 = st.columns(3)
+                
+                with col_metric1:
+                    if result['prediction'] == 'REAL':
+                        st.markdown('<div class="real-badge">✅ REAL AUDIO</div>', unsafe_allow_html=True)
+                    else:
+                        st.markdown('<div class="fake-badge">⚠️ DEEPFAKE DETECTED</div>', unsafe_allow_html=True)
+                
+                with col_metric2:
+                    st.metric("Confidence", f"{result['confidence']*100:.1f}%")
+                
+                with col_metric3:
+                    st.metric("Decision", result['prediction'])
+                
+                # Probability bars
+                st.progress(result['real_prob'], text=f"🎵 Real: {result['real_prob']*100:.1f}%")
+                st.progress(result['fake_prob'], text=f"🤖 Deepfake: {result['fake_prob']*100:.1f}%")
+                
+                # Spectrogram
+                if show_spectrogram:
+                    st.subheader("📊 Spectrogram")
+                    fig, ax = plt.subplots(figsize=(10, 4))
+                    ax.imshow(result['mel_spec'], aspect='auto', origin='lower', cmap='viridis')
+                    ax.set_title(f"Mel-Spectrogram - {result['prediction']}")
+                    ax.set_xlabel("Time")
+                    ax.set_ylabel("Frequency")
+                    st.pyplot(fig)
+                
+                # Enhancement for deepfake
+                if result['prediction'] == 'DEEPFAKE' and auto_enhance:
+                    st.markdown("---")
+                    st.subheader("🎛️ Enhanced Audio")
+                    enhanced_path = temp_path + "_enhanced.wav"
+                    AudioEnhancer.enhance_file(temp_path, enhanced_path)
+                    with col2:
+                        st.audio(enhanced_path)
+                        with open(enhanced_path, 'rb') as f:
+                            st.download_button("💾 Download Enhanced", f, file_name="enhanced_audio.wav")
+                
+                # Download original
+                with open(temp_path, 'rb') as f:
+                    st.download_button("💾 Download Original", f, file_name=uploaded_file.name)
+                
+            except Exception as e:
+                st.error(f"Error processing audio: {str(e)}")
+                st.info("Please try a different audio file or convert to WAV format")
         
         # Cleanup
-        os.unlink(temp_path)
-        if os.path.exists(enhanced_path):
-            os.unlink(enhanced_path)
+        try:
+            os.unlink(temp_path)
+        except:
+            pass
 
 else:
-    st.info("👈 **Please upload an audio file from the sidebar to begin analysis**")
+    st.info("👈 **Please upload an audio file (MP3, M4A, WAV, etc.)**")
     
-    # Features
     st.markdown("---")
-    st.subheader("✨ Features")
-    
-    col_feat1, col_feat2, col_feat3 = st.columns(3)
-    
-    with col_feat1:
-        st.markdown("""
-        ### 🎯 **Detection**
-        - ResNet-18 CNN
-        - 95%+ accuracy
-        - Real-time inference
-        - Confidence scoring
-        """)
-    
-    with col_feat2:
-        st.markdown("""
-        ### 🎛️ **Enhancement**
-        - Artifact reduction
-        - Spectral smoothing
-        - Dynamic filtering
-        - Naturalness improvement
-        """)
-    
-    with col_feat3:
-        st.markdown("""
-        ### 📊 **Visualization**
-        - Mel-spectrograms
-        - Confidence gauges
-        - Probability distribution
-        - Before/after comparison
-        """)
-
-st.markdown("---")
-st.markdown("""
-<div style="text-align: center; color: #666; font-size: 0.8rem;">
-Built with ResNet-18, PyTorch, and Streamlit | Deepfake Detection & Enhancement System
-</div>
-""", unsafe_allow_html=True)
+    st.subheader("✨ Supported Formats")
+    st.write("✅ MP3, M4A, WAV, FLAC, OGG, AAC, WMA")
+    st.write("✅ Any sample rate (auto-converted to 16kHz)")
+    st.write("✅ Any duration (trimmed/padded to 3 seconds)")
