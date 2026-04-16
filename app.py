@@ -1,6 +1,5 @@
 # ============================================
-# DEEPFAKE AUDIO DETECTION SYSTEM
-# WORKING WITH YOUR TRAINED MODEL
+# DEEPFAKE AUDIO DETECTION SYSTEM - FULLY FIXED
 # ============================================
 
 import streamlit as st
@@ -17,7 +16,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ============================================
-# MODEL ARCHITECTURE (Must match training)
+# MODEL ARCHITECTURE
 # ============================================
 
 class SimpleDetector(nn.Module):
@@ -53,7 +52,7 @@ def load_model():
     if not model_path.exists():
         st.error("❌ Model file 'best_model.pth' not found!")
         st.info("Please upload the model file to the app directory")
-        return None
+        return None, None
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     model = SimpleDetector().to(device)
@@ -191,7 +190,6 @@ with st.sidebar:
     - **Architecture:** CNN with Adaptive Pooling
     - **Accuracy:** 100% on test data
     - **Input:** Mel-spectrogram (64×time)
-    - **Model Size:** Small & Fast
     """)
 
 # Main content
@@ -204,6 +202,9 @@ if uploaded_file is not None:
         with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp_file:
             tmp_file.write(uploaded_file.getvalue())
             temp_path = tmp_file.name
+        
+        # Initialize enhanced_path as None (FIXED - defined here!)
+        enhanced_path = None
         
         # Display original audio
         col1, col2 = st.columns(2)
@@ -242,15 +243,15 @@ if uploaded_file is not None:
         if show_spectrogram:
             st.subheader("📊 Spectrogram Analysis")
             fig, ax = plt.subplots(figsize=(10, 4))
-            ax.imshow(result['mel_spec'], aspect='auto', origin='lower', cmap='viridis')
+            im = ax.imshow(result['mel_spec'], aspect='auto', origin='lower', cmap='viridis')
             ax.set_title(f"Mel-Spectrogram - {result['prediction']}")
             ax.set_xlabel("Time Frame")
             ax.set_ylabel("Mel Frequency Bin")
-            plt.colorbar(ax.imshow(result['mel_spec'], aspect='auto', origin='lower', cmap='viridis'), ax=ax)
+            plt.colorbar(im, ax=ax)
             st.pyplot(fig)
             plt.close()
         
-        # Enhancement for deepfake
+        # Enhancement for deepfake (only if DEEPFAKE)
         if result['prediction'] == 'DEEPFAKE' and auto_enhance:
             st.markdown("---")
             st.subheader("🎛️ Enhanced Audio")
@@ -265,14 +266,21 @@ if uploaded_file is not None:
                     with open(enhanced_path, 'rb') as f:
                         st.download_button("💾 Download Enhanced", f, file_name="enhanced_audio.wav")
         
-        # Download original
+        # Download original button
         with open(temp_path, 'rb') as f:
             st.download_button("💾 Download Original", f, file_name=uploaded_file.name)
         
-        # Cleanup
-        os.unlink(temp_path)
-        if os.path.exists(enhanced_path):
-            os.unlink(enhanced_path)
+        # Cleanup - FIXED: check if enhanced_path exists before trying to delete
+        try:
+            os.unlink(temp_path)
+        except:
+            pass
+        
+        if enhanced_path and os.path.exists(enhanced_path):
+            try:
+                os.unlink(enhanced_path)
+            except:
+                pass
 
 else:
     st.info("👈 **Upload an audio file to detect if it's REAL or DEEPFAKE**")
